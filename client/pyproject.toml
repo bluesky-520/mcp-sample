@@ -1,11 +1,9 @@
 [project]
-name = "mcp-client"
+name = "client"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
-    "anthropic>=0.40.0",
-    "mcp>=1.1.1",
-    "python-dotenv>=1.0.1",
+    "mcp>=1.10.1",
 ]

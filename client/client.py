@@ -1,21 +1,18 @@
 import asyncio
+import os
+import sys
 from typing import Optional
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from anthropic import Anthropic
-from dotenv import load_dotenv
-
-load_dotenv()  # load environment variables from .env
-
 class MCPClient:
     def __init__(self):
         # Initialize session and client objects
-        self.session: Optional[ClientSession] = None
+        self.session: ClientSession | None = None
         self.exit_stack = AsyncExitStack()
-        self.anthropic = Anthropic()
+        self.available_tools = []
 
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
@@ -42,85 +39,137 @@ class MCPClient:
         await self.session.initialize()
         
         # List available tools
-        response = await self.session.list_tools()
-        tools = response.tools
-        print("\nConnected to server with tools:", [tool.name for tool in tools])
+        if self.session:
+            response = await self.session.list_tools()
+            self.available_tools = response.tools
+            print("\nConnected to server with tools:", [tool.name for tool in self.available_tools])
 
-    async def process_query(self, query: str) -> str:
-        """Process a query using Claude and available tools"""
-        messages = [
-            {
-                "role": "user",
-                "content": query
-            }
-        ]
+    def display_available_tools(self):
+        """Display all available tools with their descriptions"""
+        print("\n=== Available Tools ===")
+        for i, tool in enumerate(self.available_tools, 1):
+            print(f"{i}. {tool.name}")
+            if tool.description:
+                print(f"   Description: {tool.description}")
+            if tool.inputSchema:
+                print(f"   Parameters: {tool.inputSchema}")
+            print()
 
-        response = await self.session.list_tools()
-        available_tools = [{ 
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.inputSchema
-        } for tool in response.tools]
+    def get_tool_by_name(self, tool_name: str):
+        """Get a tool by name"""
+        for tool in self.available_tools:
+            if tool.name == tool_name:
+                return tool
+        return None
 
-        # Initial Claude API call
-        response = self.anthropic.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1000,
-            messages=messages,
-            tools=available_tools
-        )
-
-        # Process response and handle tool calls
-        final_text = []
-
-        for content in response.content:
-            if content.type == 'text':
-                final_text.append(content.text)
-            elif content.type == 'tool_use':
-                tool_name = content.name
-                tool_args = content.input
+    async def call_tool_interactive(self, tool_name: str) -> str:
+        """Call a tool interactively, prompting for parameters"""
+        tool = self.get_tool_by_name(tool_name)
+        if not tool:
+            return f"Error: Tool '{tool_name}' not found"
+        
+        print(f"\nCalling tool: {tool_name}")
+        if tool.description:
+            print(f"Description: {tool.description}")
+        
+        # Collect parameters interactively
+        args = {}
+        if tool.inputSchema and tool.inputSchema.get("properties"):
+            properties = tool.inputSchema["properties"]
+            required = tool.inputSchema.get("required", [])
+            
+            for param_name, param_info in properties.items():
+                param_type = param_info.get("type", "string")
+                param_desc = param_info.get("description", "")
+                is_required = param_name in required
                 
-                # Execute tool call
-                result = await self.session.call_tool(tool_name, tool_args)
-                final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
+                print(f"\nParameter: {param_name} ({param_type})")
+                if param_desc:
+                    print(f"Description: {param_desc}")
+                if is_required:
+                    print("(Required)")
+                
+                while True:
+                    value = input(f"Enter value for {param_name}: ").strip()
+                    if not value and is_required:
+                        print("This parameter is required!")
+                        continue
+                    
+                    # Convert value based on type
+                    try:
+                        if param_type == "number" or param_type == "integer":
+                            if value:
+                                args[param_name] = float(value) if param_type == "number" else int(value)
+                            else:
+                                args[param_name] = None
+                        elif param_type == "boolean":
+                            if value.lower() in ["true", "1", "yes"]:
+                                args[param_name] = True
+                            elif value.lower() in ["false", "0", "no"]:
+                                args[param_name] = False
+                            else:
+                                args[param_name] = None
+                        else:
+                            args[param_name] = value if value else None
+                        break
+                    except ValueError:
+                        print(f"Invalid {param_type} value. Please try again.")
+        
+        # Call the tool
+        try:
+            result = await self.session.call_tool(tool_name, args)
+            return result.content
+        except Exception as e:
+            return f"Error calling tool: {str(e)}"
 
-                # Continue conversation with tool results
-                if hasattr(content, 'text') and content.text:
-                    messages.append({
-                      "role": "assistant",
-                      "content": content.text
-                    })
-                messages.append({
-                    "role": "user", 
-                    "content": result.content
-                })
-
-                # Get next response from Claude
-                response = self.anthropic.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=1000,
-                    messages=messages,
-                )
-
-                final_text.append(response.content[0].text)
-
-        return "\n".join(final_text)
-
-    async def chat_loop(self):
-        """Run an interactive chat loop"""
-        print("\nMCP Client Started!")
-        print("Type your queries or 'quit' to exit.")
+    async def interactive_menu(self):
+        """Run an interactive menu for tool selection"""
+        print("\n=== MCP Client Menu ===")
+        print("1. List available tools")
+        print("2. Call a tool")
+        print("3. Quit")
         
         while True:
             try:
-                query = input("\nQuery: ").strip()
+                choice = input("\nEnter your choice (1-3): ").strip()
                 
-                if query.lower() == 'quit':
+                if choice == "1":
+                    self.display_available_tools()
+                elif choice == "2":
+                    if not self.available_tools:
+                        print("No tools available. Please connect to a server first.")
+                        continue
+                    
+                    print("\nAvailable tools:")
+                    for i, tool in enumerate(self.available_tools, 1):
+                        print(f"{i}. {tool.name}")
+                    
+                    tool_choice = input("\nEnter tool number or name: ").strip()
+                    
+                    # Try to parse as number first
+                    try:
+                        tool_index = int(tool_choice) - 1
+                        if 0 <= tool_index < len(self.available_tools):
+                            tool_name = self.available_tools[tool_index].name
+                        else:
+                            print("Invalid tool number!")
+                            continue
+                    except ValueError:
+                        # Treat as tool name
+                        tool_name = tool_choice
+                    
+                    result = await self.call_tool_interactive(tool_name)
+                    print(f"\nResult:\n{result}")
+                    
+                elif choice == "3":
+                    print("Goodbye!")
                     break
+                else:
+                    print("Invalid choice. Please enter 1, 2, or 3.")
                     
-                response = await self.process_query(query)
-                print("\n" + response)
-                    
+            except KeyboardInterrupt:
+                print("\nGoodbye!")
+                break
             except Exception as e:
                 print(f"\nError: {str(e)}")
     
@@ -136,10 +185,9 @@ async def main():
     client = MCPClient()
     try:
         await client.connect_to_server(sys.argv[1])
-        await client.chat_loop()
+        await client.interactive_menu()
     finally:
         await client.cleanup()
 
 if __name__ == "__main__":
-    import sys
     asyncio.run(main())

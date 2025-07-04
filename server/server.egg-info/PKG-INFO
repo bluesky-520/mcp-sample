@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: server
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.28.1
+Requires-Dist: mcp[cli,i]>=1.10.1
